@@ -1,0 +1,77 @@
+{
+  "schema_version": 1,
+  "severity_order": ["CRITICAL", "HIGH", "MEDIUM", "LOW", "PASS"],
+  "severity_colors": {
+    "CRITICAL": ["#dc2626", "#fef2f2", "#991b1b"],
+    "HIGH": ["#ea580c", "#fff7ed", "#9a3412"],
+    "MEDIUM": ["#ca8a04", "#fefce8", "#854d0e"],
+    "LOW": ["#2563eb", "#eff6ff", "#1e40af"],
+    "PASS": ["#16a34a", "#f0fdf4", "#166534"]
+  },
+  "severity_labels": {
+    "CRITICAL": "Ship-blocking",
+    "HIGH": "Must fix",
+    "MEDIUM": "Should fix",
+    "LOW": "Nice to have",
+    "PASS": "All clear"
+  },
+  "dimension_names": {
+    "1": "Input Validation",
+    "2": "State Machine",
+    "3": "Numerical Stability",
+    "4": "Authorization / Access Control",
+    "5": "Lifecycle Management",
+    "6": "Concurrency",
+    "7": "Error Handling & Resilience",
+    "8": "Remote Code Execution"
+  },
+  "themes": [
+    {
+      "id": "input-resilience",
+      "name": "Input Resilience",
+      "icon": "🛡️",
+      "description": "Input validation is incomplete or inconsistent across code paths. Empty strings, mid-operation EOF, and different validation rules in set_score vs route_task mean the system behaves differently depending on how you talk to it.",
+      "match_keywords": ["empty", "validation", "mismatch", "eof", "NaN", "Infinity", "boundary"]
+    },
+    {
+      "id": "state-integrity",
+      "name": "State Management",
+      "icon": "🔄",
+      "description": "State changes aren't tracked or reversible. Agent deletion orphans scores, re-registration loses history, and new domains appear silently. The system has no audit trail for its own state mutations.",
+      "match_keywords": ["remove-agent", "delete", "implicitly", "silently", "orphan", "state"]
+    },
+    {
+      "id": "authz-integrity",
+      "name": "Authorization Logic",
+      "icon": "🚨",
+      "description": "Access controls can be circumvented or thrash uncontrollably. Gates exist to protect hard tasks from underqualified agents — if force-assign bypasses the gate or the gate oscillates on every result, the protection is illusory.",
+      "match_keywords": ["force", "bypass", "oscillation", "thrash", "gate", "authN"]
+    },
+    {
+      "id": "data-handling",
+      "name": "Data Integrity",
+      "icon": "📊",
+      "description": "Scores/report data can be corrupted or behave counterintuitively. NaN/Infinity inputs and saturating updates break assumptions downstream. If inputs are not guarded, the entire reporting/routing layer loses credibility.",
+      "match_keywords": ["nan", "infinity", "replay", "idempotent", "decay", "cascade", "corrupt"]
+    }
+  ],
+  "glossary": {
+    "NaN": "Not a Number — a floating-point value defined by IEEE 754 that represents undefined or unrepresentable results. Every comparison with NaN is always false, making it impossible to ever meet a gate threshold.",
+    "IEEE 754": "The international standard governing floating-point arithmetic. It defines how NaN and Infinity behave in comparisons and arithmetic operations — these are spec rules, not bugs in user code.",
+    "Infinity": "A floating-point value representing mathematical infinity. Per IEEE 754, `inf >= x` is always true for any finite x, which makes it an automatic gate pass for any threshold.",
+    "EMA": "Exponential Moving Average — a formula that weights recent outcomes more heavily than older ones. The score is an EMA that pulls the current value toward the outcome value with each update.",
+    "fixed point": "The value the EMA converges to when all outcomes are the same. For a success outcome value of 70, the score's fixed point is 70 — scores above 70 actually decrease on success.",
+    "hysteresis": "A buffer zone around a threshold that prevents rapid toggling. Instead of flipping on every crossing, require two consecutive readings above to promote and two below to demote.",
+    "idempotency": "The property that performing the same operation multiple times produces the same result as doing it once. Prevents replay attacks from inflating scores.",
+    "authZ": "Authorization — the process of checking whether an entity has permission to perform an action. Distinct from authN (authentication, or who you are).",
+    "orphan": "Data that exists in the system but has no owner and is no longer accessible through normal operations. Agent scores become orphaned when an agent is deleted without archiving.",
+    "saturating": "An update that caps itself so it cannot move in the wrong direction. For scores, a saturating update would never decrease a score on success — it only allows increases.",
+    "tombstone": "A marker left behind when data is deleted, indicating the data existed and was intentionally removed. Enables recovery and prevents silent data loss.",
+    "speed bump": "A lightweight confirmation check that asks 'are you sure?' before allowing a potentially dangerous operation. Not a hard block — just a pause for intent confirmation.",
+    "EMA fixed point at 70": "Since the EMA formula pulls the current score toward the outcome value (70 for success), any score above 70 will decrease toward 70, and any score below 70 will increase toward 70.",
+    "guard": "A validation check at a system boundary that rejects invalid inputs before they enter the system. Typically an if-statement or assert that enforces domain rules.",
+    "boundary": "The interface between two system components where data crosses from one trust domain to another. Each boundary is a natural place to install guards and validation.",
+    "gate": "A threshold check that controls access to tasks based on agent score. Agents must meet or exceed the gate score to be eligible for a task difficulty level.",
+    "force-assign": "A debug mechanism that bypasses gate checks to assign any agent to any task regardless of score. Intentionally skips all authorization checks."
+  }
+}

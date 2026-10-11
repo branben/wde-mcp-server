@@ -1,0 +1,592 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>WORST DAY EVER — Adversarial Resilience Scanner</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root {
+    /* Linear-inspired palette with a hostile green twist */
+    --bg-canvas: #08090a;
+    --bg-panel: #0f1011;
+    --bg-surface: #191a1b;
+    --bg-elevated: #28282c;
+    --border-subtle: rgba(255, 255, 255, 0.05);
+    --border-standard: rgba(255, 255, 255, 0.08);
+    --text-primary: #f7f8f8;
+    --text-secondary: #d0d6e0;
+    --text-tertiary: #8a8f98;
+    --text-quaternary: #62666d;
+    --hostile: #ff4444;
+    --hostile-dim: rgba(255, 68, 68, 0.15);
+    --warning: #f0a030;
+    --warning-dim: rgba(240, 160, 48, 0.15);
+    --ok: #10b981;
+    --ok-dim: rgba(16, 185, 129, 0.15);
+    --accent: #7170ff;
+    --accent-hover: #828fff;
+    --mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    --sans: 'Inter', system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  }
+
+  *, *::before, *::after {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+  }
+
+  html, body {
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+  }
+
+  body {
+    background: var(--bg-canvas);
+    font-family: var(--sans);
+    color: var(--text-secondary);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    position: relative;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* Scanlines */
+  body::before {
+    content: '';
+    position: fixed;
+    inset: 0;
+    background: repeating-linear-gradient(
+      0deg,
+      transparent,
+      transparent 2px,
+      rgba(0, 0, 0, 0.15) 2px,
+      rgba(0, 0, 0, 0.15) 4px
+    );
+    pointer-events: none;
+    z-index: 100;
+  }
+
+  /* Vignette */
+  body::after {
+    content: '';
+    position: fixed;
+    inset: 0;
+    background: radial-gradient(ellipse at center, transparent 50%, rgba(0, 0, 0, 0.5) 100%);
+    pointer-events: none;
+    z-index: 101;
+  }
+
+  .terminal {
+    width: 100%;
+    max-width: 760px;
+    padding: 48px 40px;
+    position: relative;
+  }
+
+  /* Title block */
+  .title-block {
+    margin-bottom: 40px;
+  }
+
+  .title-label {
+    font-family: var(--mono);
+    font-size: 11px;
+    font-weight: 400;
+    color: var(--text-quaternary);
+    letter-spacing: 0.5px;
+    margin-bottom: 12px;
+    text-transform: uppercase;
+  }
+
+  .title-main {
+    font-family: var(--sans);
+    font-size: 42px;
+    font-weight: 600;
+    color: var(--text-primary);
+    letter-spacing: -1.5px;
+    line-height: 1.0;
+    margin-bottom: 8px;
+  }
+
+  .title-sub {
+    font-family: var(--mono);
+    font-size: 13px;
+    color: var(--text-tertiary);
+    letter-spacing: normal;
+  }
+
+  .title-sub .dot {
+    display: inline-block;
+    width: 6px;
+    height: 6px;
+    background: var(--hostile);
+    border-radius: 50%;
+    margin-right: 8px;
+    vertical-align: middle;
+    animation: pulse-dot 1.5s ease-in-out infinite;
+  }
+
+  @keyframes pulse-dot {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.3; }
+  }
+
+  /* Face card */
+  .face-card {
+    background: var(--bg-panel);
+    border: 1px solid var(--border-subtle);
+    border-radius: 12px;
+    padding: 32px;
+    margin-bottom: 24px;
+    text-align: center;
+    position: relative;
+    overflow: hidden;
+  }
+
+  .face-card::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 1px;
+    background: linear-gradient(90deg, transparent, var(--border-standard), transparent);
+  }
+
+  .face-ascii {
+    font-family: var(--mono);
+    font-size: 14px;
+    line-height: 1.2;
+    color: var(--text-tertiary);
+    white-space: pre;
+    display: inline-block;
+    animation: face-breathe 4s ease-in-out infinite;
+  }
+
+  .face-ascii .eye {
+    display: inline-block;
+    width: 1ch;
+    text-align: center;
+  }
+
+  .face-ascii .eye-open { display: inline; }
+  .face-ascii .eye-closed { display: none; }
+
+  .face-ascii.blink .eye-open { display: none; }
+  .face-ascii.blink .eye-closed { display: inline; }
+
+  @keyframes face-breathe {
+    0%, 100% { transform: translateY(0); opacity: 0.8; }
+    50% { transform: translateY(-2px); opacity: 1; }
+  }
+
+  .face-caption {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--text-quaternary);
+    margin-top: 16px;
+    letter-spacing: 0.5px;
+  }
+
+  /* Status grid */
+  .status-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 1px;
+    background: var(--border-subtle);
+    border: 1px solid var(--border-subtle);
+    border-radius: 12px;
+    overflow: hidden;
+    margin-bottom: 24px;
+  }
+
+  .status-cell {
+    background: var(--bg-panel);
+    padding: 16px 20px;
+  }
+
+  .status-cell-label {
+    font-family: var(--mono);
+    font-size: 10px;
+    color: var(--text-quaternary);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin-bottom: 6px;
+  }
+
+  .status-cell-value {
+    font-family: var(--sans);
+    font-size: 20px;
+    font-weight: 500;
+    color: var(--text-primary);
+    letter-spacing: -0.5px;
+  }
+
+  .status-cell-value.hostile {
+    color: var(--hostile);
+  }
+
+  .status-cell-value.ok {
+    color: var(--ok);
+  }
+
+  .status-cell-value.warn {
+    color: var(--warning);
+  }
+
+  .status-cell-sub {
+    font-family: var(--mono);
+    font-size: 10px;
+    color: var(--text-quaternary);
+    margin-top: 2px;
+  }
+
+  /* Event log */
+  .event-log {
+    background: var(--bg-panel);
+    border: 1px solid var(--border-subtle);
+    border-radius: 12px;
+    overflow: hidden;
+  }
+
+  .event-log-header {
+    padding: 12px 20px;
+    border-bottom: 1px solid var(--border-subtle);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+
+  .event-log-title {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--text-tertiary);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+
+  .event-log-count {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--text-quaternary);
+  }
+
+  .event-log-body {
+    max-height: 200px;
+    overflow-y: auto;
+    padding: 8px 0;
+  }
+
+  .event-log-body::-webkit-scrollbar {
+    width: 4px;
+  }
+
+  .event-log-body::-webkit-scrollbar-thumb {
+    background: var(--border-standard);
+    border-radius: 2px;
+  }
+
+  .event-row {
+    padding: 6px 20px;
+    font-family: var(--mono);
+    font-size: 12px;
+    line-height: 1.5;
+    display: flex;
+    gap: 12px;
+    align-items: baseline;
+  }
+
+  .event-row .ts {
+    color: var(--text-quaternary);
+    flex-shrink: 0;
+    font-size: 11px;
+  }
+
+  .event-row .msg {
+    color: var(--text-tertiary);
+    flex: 1;
+  }
+
+  .event-row .msg .tag {
+    display: inline-block;
+    padding: 1px 6px;
+    border-radius: 3px;
+    font-size: 10px;
+    font-weight: 500;
+    margin-right: 4px;
+  }
+
+  .event-row .msg .tag-ok {
+    background: var(--ok-dim);
+    color: var(--ok);
+  }
+
+  .event-row .msg .tag-warn {
+    background: var(--warning-dim);
+    color: var(--warning);
+  }
+
+  .event-row .msg .tag-critical {
+    background: var(--hostile-dim);
+    color: var(--hostile);
+  }
+
+  .event-row.fade-in {
+    animation: row-fade-in 0.3s ease-out forwards;
+  }
+
+  @keyframes row-fade-in {
+    from { opacity: 0; transform: translateY(4px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+
+  /* Prompt line */
+  .prompt-line {
+    margin-top: 24px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .prompt-line .prompt-text {
+    font-family: var(--mono);
+    font-size: 13px;
+    color: var(--text-tertiary);
+  }
+
+  .prompt-line .prompt-path {
+    font-family: var(--mono);
+    font-size: 13px;
+    color: var(--accent);
+  }
+
+  .cursor-block {
+    display: inline-block;
+    width: 8px;
+    height: 18px;
+    background: var(--accent);
+    animation: cursor-blink 1s step-end infinite;
+    vertical-align: middle;
+  }
+
+  @keyframes cursor-blink {
+    0%, 49% { opacity: 1; }
+    50%, 100% { opacity: 0; }
+  }
+
+  /* Responsive */
+  @media (max-width: 640px) {
+    .terminal { padding: 32px 20px; }
+    .title-main { font-size: 32px; letter-spacing: -1px; }
+    .status-grid { grid-template-columns: 1fr; }
+    .face-ascii { font-size: 11px; }
+  }
+
+  /* Glitch trigger */
+  .face-card.glitch {
+    animation: card-glitch 0.15s steps(1);
+  }
+
+  @keyframes card-glitch {
+    0%, 100% { transform: translateX(0); }
+    25% { transform: translateX(-3px); }
+    75% { transform: translateX(3px); }
+  }
+</style>
+</head>
+<body>
+
+<div class="terminal">
+  <div class="title-block">
+    <div class="title-label">Adversarial Resilience Scanner v1.0.0</div>
+    <div class="title-main">WORST DAY EVER</div>
+    <div class="title-sub"><span class="dot"></span>Simulating pathological user flows — sandboxed, no real data</div>
+  </div>
+
+  <div class="face-card" id="faceCard">
+    <div class="face-ascii" id="faceAscii">
+   ████████████████
+  ██              ██
+  ██  <span class="eye-open">◉</span><span class="eye-closed">─</span>        <span class="eye-open">◉</span><span class="eye-closed">─</span>  ██
+  ██      ▼▼      ██
+  ██   ╲______╱   ██
+   ████████████████
+    </div>
+    <div class="face-caption">SYSTEM IS PROCESSING WORST-CASE SCENARIOS</div>
+  </div>
+
+  <div class="status-grid">
+    <div class="status-cell">
+      <div class="status-cell-label">Uptime</div>
+      <div class="status-cell-value" id="uptime">00:00</div>
+    </div>
+    <div class="status-cell">
+      <div class="status-cell-label">Critical</div>
+      <div class="status-cell-value hostile" id="critical">0</div>
+    </div>
+    <div class="status-cell">
+      <div class="status-cell-label">Resilience</div>
+      <div class="status-cell-value" id="resilience">--</div>
+    </div>
+    <div class="status-cell">
+      <div class="status-cell-label">Dimensions</div>
+      <div class="status-cell-value" id="dimensions">0 / 8</div>
+    </div>
+    <div class="status-cell">
+      <div class="status-cell-label">Mode</div>
+      <div class="status-cell-value" id="mode">SANDBOX</div>
+    </div>
+    <div class="status-cell">
+      <div class="status-cell-label">Last Event</div>
+      <div class="status-cell-value" id="lastEvent" style="font-size:13px">booting...</div>
+    </div>
+  </div>
+
+  <div class="event-log">
+    <div class="event-log-header">
+      <div class="event-log-title">Event Stream</div>
+      <div class="event-log-count" id="eventCount">0 events</div>
+    </div>
+    <div class="event-log-body" id="eventLogBody">
+    </div>
+  </div>
+
+  <div class="prompt-line">
+    <span class="prompt-text">worst-day-ever</span>
+    <span class="prompt-path">~/project</span>
+    <span class="prompt-text">$</span>
+    <span class="cursor-block"></span>
+  </div>
+</div>
+
+<script>
+  // === State ===
+  const startTime = Date.now();
+  let criticalCount = 0;
+  let dimCount = 0;
+  let eventCount = 0;
+
+  // === Events ===
+  const events = [
+    { msg: "Initializing sandbox environment...", tag: null, delay: 400 },
+    { msg: "Loading attack surface matrix (8 dimensions)...", tag: null, delay: 900 },
+    { msg: "Parsing API contracts and route definitions...", tag: null, delay: 1500 },
+    { msg: "Mapping state machine transitions...", tag: null, delay: 2100 },
+    { msg: "DIMENSION 1 — Input Boundary: fuzzing type validators", tag: null, delay: 2800 },
+    { msg: "  Null bytes in string fields → <span class='tag tag-ok'>OK</span>", tag: null, delay: 3400 },
+    { msg: "  Unicode RTL override → <span class='tag tag-warn'>DETECTED</span>", tag: 'warn', delay: 4000 },
+    { msg: "  Deeply nested JSON (depth=50) → <span class='tag tag-critical'>STACK OVERFLOW</span>", tag: 'critical', delay: 4600 },
+    { msg: "DIMENSION 2 — State Machine: double-submit test", tag: null, delay: 5500 },
+    { msg: "  Payment intent replay 10× → <span class='tag tag-ok'>IDEMPOTENT</span>", tag: null, delay: 6100 },
+    { msg: "  Out-of-order confirm → <span class='tag tag-ok'>400 REJECTED</span>", tag: null, delay: 6700 },
+    { msg: "DIMENSION 3 — Temporal: token replay attack", tag: null, delay: 7600 },
+    { msg: "  Expired JWT → <span class='tag tag-ok'>REJECTED</span>", tag: null, delay: 8200 },
+    { msg: "  Counter race (100 claims) → <span class='tag tag-ok'>1 SUCCESS, 99 REJECTED</span>", tag: null, delay: 8800 },
+    { msg: "DIMENSION 4 — AuthN/Z: horizontal escalation", tag: null, delay: 9700 },
+    { msg: "  Resource ID increment → <span class='tag tag-ok'>403 FORBIDDEN</span>", tag: null, delay: 10300 },
+    { msg: "  Cross-tenant ID → <span class='tag tag-ok'>404 (safe)</span>", tag: null, delay: 10900 },
+    { msg: "DIMENSION 5 — Data Integrity: orphan references", tag: null, delay: 11800 },
+    { msg: "  Deleted user's scheduled jobs → <span class='tag tag-critical'>STILL RUNNING</span>", tag: 'critical', delay: 12400 },
+    { msg: "  Pagination cursor=-1 → <span class='tag tag-ok'>200 EMPTY</span>", tag: null, delay: 13000 },
+    { msg: "DIMENSION 6 — Concurrency: thundering herd", tag: null, delay: 13900 },
+    { msg: "  1000 reads on mutating record → <span class='tag tag-ok'>OK</span>", tag: null, delay: 14500 },
+    { msg: "  Cache death spiral → <span class='tag tag-warn'>RECOVERY 2.3s</span>", tag: 'warn', delay: 15100 },
+    { msg: "DIMENSION 7 — External Deps: payment gateway down", tag: null, delay: 16000 },
+    { msg: "  Gateway timeout → <span class='tag tag-ok'>ORDER PENDING</span>", tag: null, delay: 16600 },
+    { msg: "  Email unreachable → <span class='tag tag-ok'>USER NOTIFIED</span>", tag: null, delay: 17200 },
+    { msg: "DIMENSION 8 — Brownfield: mining production logs", tag: null, delay: 18100 },
+    { msg: "  5xx pattern amplified → <span class='tag tag-critical'>MALFORMED ENUM</span>", tag: 'critical', delay: 18700 },
+    { msg: "  Soft-deleted with active refs → <span class='tag tag-warn'>12 FOUND</span>", tag: 'warn', delay: 19300 },
+    { msg: "Generating disaster report...", tag: null, delay: 20200 },
+    { msg: "Resilience score calculated → <span class='tag tag-warn'>6.2 / 10</span>", tag: 'warn', delay: 20800 },
+    { msg: "Report saved to ./disaster-report.md", tag: null, delay: 21400 },
+  ];
+
+  // === DOM refs ===
+  const uptimeEl = document.getElementById('uptime');
+  const criticalEl = document.getElementById('critical');
+  const resilienceEl = document.getElementById('resilience');
+  const dimensionsEl = document.getElementById('dimensions');
+  const lastEventEl = document.getElementById('lastEvent');
+  const eventLogBody = document.getElementById('eventLogBody');
+  const eventCountEl = document.getElementById('eventCount');
+  const faceAscii = document.getElementById('faceAscii');
+  const faceCard = document.getElementById('faceCard');
+
+  // === Uptime ===
+  function updateUptime() {
+    const elapsed = Math.floor((Date.now() - startTime) / 1000);
+    const m = String(Math.floor(elapsed / 60)).padStart(2, '0');
+    const s = String(elapsed % 60).padStart(2, '0');
+    uptimeEl.textContent = `${m}:${s}`;
+  }
+  setInterval(updateUptime, 1000);
+
+  // === Face blink ===
+  function blink() {
+    faceAscii.classList.add('blink');
+    setTimeout(() => faceAscii.classList.remove('blink'), 120);
+  }
+
+  function scheduleBlink() {
+    blink();
+    const next = 2500 + Math.random() * 3000;
+    setTimeout(scheduleBlink, next);
+  }
+  scheduleBlink();
+
+  // === Glitch on critical ===
+  function triggerGlitch() {
+    faceCard.classList.add('glitch');
+    setTimeout(() => faceCard.classList.remove('glitch'), 150);
+  }
+
+  // === Event rendering ===
+  function renderEvent(event, index) {
+    const row = document.createElement('div');
+    row.className = 'event-row fade-in';
+
+    const now = new Date();
+    const ts = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}:${String(now.getSeconds()).padStart(2, '0')}`;
+
+    row.innerHTML = `<span class="ts">${ts}</span><span class="msg">${event.msg}</span>`;
+    eventLogBody.appendChild(row);
+    eventLogBody.scrollTop = eventLogBody.scrollHeight;
+
+    eventCount++;
+    eventCountEl.textContent = `${eventCount} events`;
+
+    // Update last event text (strip HTML tags)
+    const cleanMsg = event.msg.replace(/<[^>]+>/g, '');
+    lastEventEl.textContent = cleanMsg.length > 30 ? cleanMsg.substring(0, 30) + '...' : cleanMsg;
+
+    // Update critical count
+    if (event.tag === 'critical') {
+      criticalCount++;
+      criticalEl.textContent = criticalCount;
+      triggerGlitch();
+    }
+
+    // Update dimensions
+    if (event.msg.startsWith('DIMENSION')) {
+      dimCount++;
+      dimensionsEl.textContent = `${dimCount} / 8`;
+    }
+
+    // Final event
+    if (index === events.length - 1) {
+      resilienceEl.textContent = '6.2 / 10';
+      resilienceEl.className = 'status-cell-value warn';
+    }
+  }
+
+  // === Run all events ===
+  events.forEach((event, i) => {
+    setTimeout(() => renderEvent(event, i), event.delay);
+  });
+</script>
+</body>
+</html>
