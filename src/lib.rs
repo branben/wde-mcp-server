@@ -8,33 +8,30 @@
 //!   * `wde-mcp-stdio` — stdio (for MCP Inspector CLI / desktop clients)
 //!   * `wde-mcp-http`  — streamable HTTP on 127.0.0.1:3001/mcp (for Inspector web UI)
 
-use std::{
-    collections::HashMap,
-    fs,
-    path::Path,
-    sync::Arc,
-};
+use std::{collections::HashMap, fs, path::Path, sync::Arc};
 
 use rmcp::{
     ErrorData as McpError, ServerHandler,
-    handler::server::{router::tool::ToolRouter, wrapper::Parameters},
+    handler::server::wrapper::Parameters,
+    model::skills::{
+        self, SkillEntry, SkillResource, SkillResources, SkillsGetRequestParams, SkillsGetResult,
+        SkillsListResult,
+    },
     model::{
         CallToolResult, ContentBlock, Implementation, InitializeResult, PaginatedRequestParams,
         ProtocolVersion, ReadResourceRequestParams, ReadResourceResponse, ReadResourceResult,
         Resource, ResourceContents, ServerCapabilities,
     },
-    model::skills::{
-        self, SkillEntry, SkillResource, SkillResources, SkillsGetRequestParams,
-        SkillsGetResult, SkillsListResult,
-    },
-    schemars, service::{RequestContext, RoleServer}, tool, tool_handler, tool_router,
+    schemars,
+    service::{RequestContext, RoleServer},
+    tool, tool_handler, tool_router,
 };
-
-/// Substring in the WDE SKILL.md frontmatter that marks a "critical" note.
-const CRITICAL_MARKERS: [&str; 5] = ["CRITICAL", "never", "NEVER", "non-negotiable", "abort"];
 
 /// A skill directory entry: URI suffix -> raw bytes of the file.
 type SkillFiles = HashMap<String, Vec<u8>>;
+
+/// The catalog a server is built from: skills by URI, and their files by root URI.
+type SkillCatalog = (HashMap<String, SkillEntry>, HashMap<String, SkillFiles>);
 
 // ===========================================================================
 // Server
@@ -42,7 +39,6 @@ type SkillFiles = HashMap<String, Vec<u8>>;
 
 #[derive(Debug, Clone)]
 pub struct WdeServer {
-    tool_router: ToolRouter<WdeServer>,
     /// skill URI -> parsed skill entry
     skills: Arc<HashMap<String, SkillEntry>>,
     /// skill URI -> (relative path -> file bytes) for resources/directory/read
@@ -55,16 +51,13 @@ impl WdeServer {
         let root = root.as_ref();
         let (skills, skill_files) = Self::discover_skills(root)?;
         Ok(Self {
-            tool_router: Self::tool_router(),
             skills: Arc::new(skills),
             skill_files: Arc::new(skill_files),
         })
     }
 
     /// Discover every `SKILL.md` under `root` and index its sibling files.
-    fn discover_skills(
-        root: &Path,
-    ) -> Result<(HashMap<String, SkillEntry>, HashMap<String, SkillFiles>), std::io::Error> {
+    fn discover_skills(root: &Path) -> Result<SkillCatalog, std::io::Error> {
         let mut skills = HashMap::new();
         let mut files: HashMap<String, SkillFiles> = HashMap::new();
         let canonical_root = root.canonicalize()?;
@@ -83,19 +76,22 @@ impl WdeServer {
             let path = entry.path();
             if path.is_dir() {
                 Self::walk(root, &path, skills, files)?;
-            } else if path.file_name().and_then(|s| s.to_str()) == Some("SKILL.md") {
-                if let Some((entry_skill, dir_files)) = Self::parse_skill(root, &path) {
-                    // Key the file map by the skill ROOT uri (`skill://<rel>`),
-                    // which is what `resources/directory/read` requests carry.
-                    // The `skills` map stays keyed by the full `.../SKILL.md` uri.
-                    let root_uri = entry_skill
-                        .uri
-                        .strip_suffix("/SKILL.md")
-                        .unwrap_or(&entry_skill.uri)
-                        .to_string();
-                    files.insert(root_uri, dir_files);
-                    skills.insert(entry_skill.uri.clone(), entry_skill);
-                }
+                continue;
+            }
+            if path.file_name().and_then(|s| s.to_str()) != Some("SKILL.md") {
+                continue;
+            }
+            if let Some((entry_skill, dir_files)) = Self::parse_skill(root, &path) {
+                // Key the file map by the skill ROOT uri (`skill://<rel>`),
+                // which is what `resources/directory/read` requests carry.
+                // The `skills` map stays keyed by the full `.../SKILL.md` uri.
+                let root_uri = entry_skill
+                    .uri
+                    .strip_suffix("/SKILL.md")
+                    .unwrap_or(&entry_skill.uri)
+                    .to_string();
+                files.insert(root_uri, dir_files);
+                skills.insert(entry_skill.uri.clone(), entry_skill);
             }
         }
         Ok(())
@@ -141,12 +137,9 @@ impl WdeServer {
                 Self::collect_files(root, &path, resources, out);
                 continue;
             }
-            let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
-                continue;
-            };
-            if name == "SKILL.md" {
-                continue;
-            }
+            // Include SKILL.md itself: the spec requires `resources` to be
+            // complete, and it is the only way an agent can read the skill's
+            // body (`skills/get` returns frontmatter only).
             let Ok(rel) = path.strip_prefix(root) else {
                 continue;
             };
@@ -156,7 +149,11 @@ impl WdeServer {
                 continue;
             };
             let size = bytes.len() as u64;
-            resources.push(SkillResource::new(uri, format!("sha256:{}", Self::hex_len(size)), size));
+            resources.push(SkillResource::new(
+                uri,
+                format!("sha256:{}", Self::hex_len(size)),
+                size,
+            ));
             out.insert(rel_str, bytes);
         }
         resources.sort_by(|a, b| a.uri.cmp(&b.uri));
@@ -176,11 +173,11 @@ impl WdeServer {
         let Some(rest) = content.strip_prefix("---\n") else {
             return serde_json::Value::Object(map);
         };
-        let mut lines = rest.lines().peekable();
+        let lines = rest.lines();
         let mut block_key: Option<String> = None;
         let mut block_lines: Vec<String> = Vec::new();
 
-        while let Some(line) = lines.next() {
+        for line in lines {
             if line.trim() == "---" {
                 break;
             }
@@ -190,7 +187,10 @@ impl WdeServer {
                     block_lines.push(line.trim_start().to_string());
                     continue;
                 }
-                map.insert(key, serde_json::Value::String(block_lines.join("\n").trim().to_string()));
+                map.insert(
+                    key,
+                    serde_json::Value::String(block_lines.join("\n").trim().to_string()),
+                );
                 block_key = None;
                 block_lines.clear();
             }
@@ -210,7 +210,10 @@ impl WdeServer {
             map.insert(k.to_string(), serde_json::Value::String(v.to_string()));
         }
         if let Some(key) = block_key {
-            map.insert(key, serde_json::Value::String(block_lines.join("\n").trim().to_string()));
+            map.insert(
+                key,
+                serde_json::Value::String(block_lines.join("\n").trim().to_string()),
+            );
         }
         serde_json::Value::Object(map)
     }
@@ -221,6 +224,33 @@ impl WdeServer {
             .keys()
             .find(|u| u.contains("worst-day-ever"))
             .cloned()
+    }
+
+    /// All discovered skills, sorted by URI.
+    pub fn list_skills(&self) -> Vec<&SkillEntry> {
+        let mut skills: Vec<&SkillEntry> = self.skills.values().collect();
+        skills.sort_by(|a, b| a.uri.cmp(&b.uri));
+        skills
+    }
+
+    /// Look up one skill by URI, accepting either the canonical
+    /// `skill://<path>/SKILL.md` form or the bare `skill://<path>` root form.
+    pub fn get_skill(&self, uri: &str) -> Option<&SkillEntry> {
+        if let Some(skill) = self.skills.get(uri) {
+            return Some(skill);
+        }
+        let normalized = format!("{}/SKILL.md", uri.trim_end_matches('/'));
+        self.skills.get(&normalized)
+    }
+
+    /// Read the raw bytes of a skill file by its `skill://` URI.
+    ///
+    /// This is the only path to a skill's *body*: `skills/get` returns
+    /// frontmatter only, so an agent that needs the instructions reads them
+    /// here. Returns `None` when the URI is not an advertised resource.
+    pub fn read_skill_file(&self, uri: &str) -> Option<&Vec<u8>> {
+        let rel = uri.strip_prefix("skill://")?;
+        self.skill_files.values().find_map(|files| files.get(rel))
     }
 }
 
@@ -249,7 +279,10 @@ impl WdeServer {
     )]
     fn worst_day_ever_assess(
         &self,
-        Parameters(AssessParams { project_path, project_name }): Parameters<AssessParams>,
+        Parameters(AssessParams {
+            project_path,
+            project_name,
+        }): Parameters<AssessParams>,
     ) -> Result<CallToolResult, McpError> {
         let path = Path::new(&project_path);
         if !path.exists() {
@@ -273,7 +306,9 @@ impl WdeServer {
         });
 
         let recon = self.recon(path);
-        let skill_uri = self.wde_uri().unwrap_or_else(|| "skill://worst-day-ever/SKILL.md".into());
+        let skill_uri = self
+            .wde_uri()
+            .unwrap_or_else(|| "skill://worst-day-ever/SKILL.md".into());
 
         let body = format!(
             "# Worst-Day-Ever assessment: {name}\n\n\
@@ -302,8 +337,16 @@ impl WdeServer {
             py = recon.py,
             js = recon.js,
             rs = recon.rust,
-            tests = if recon.test_dirs.is_empty() { "none".into() } else { recon.test_dirs.join(", ") },
-            entries = if recon.entry_points.is_empty() { "none detected".into() } else { recon.entry_points.join(", ") },
+            tests = if recon.test_dirs.is_empty() {
+                "none".into()
+            } else {
+                recon.test_dirs.join(", ")
+            },
+            entries = if recon.entry_points.is_empty() {
+                "none detected".into()
+            } else {
+                recon.entry_points.join(", ")
+            },
             hook = recon.test_hook,
         );
 
@@ -356,10 +399,10 @@ impl WdeServer {
                 continue;
             }
             if path.is_dir() {
-                if name == "tests" || name == "test" {
-                    if let Ok(rel) = path.strip_prefix(root) {
-                        recon.test_dirs.push(rel.to_string_lossy().to_string());
-                    }
+                if (name == "tests" || name == "test")
+                    && let Ok(rel) = path.strip_prefix(root)
+                {
+                    recon.test_dirs.push(rel.to_string_lossy().to_string());
                 }
                 self.walk_recon(root, &path, recon, depth + 1);
                 continue;
@@ -368,7 +411,10 @@ impl WdeServer {
                 Some("py") => {
                     recon.py += 1;
                     recon.source_files += 1;
-                    if matches!(name.as_str(), "main.py" | "app.py" | "cli.py" | "__main__.py") {
+                    if matches!(
+                        name.as_str(),
+                        "main.py" | "app.py" | "cli.py" | "__main__.py"
+                    ) {
                         recon.entry_points.push(name);
                     }
                 }
@@ -413,7 +459,10 @@ impl ServerHandler for WdeServer {
         caps.extensions = Some(ext);
 
         InitializeResult::new(caps)
-            .with_server_info(Implementation::new("wde-mcp-server", env!("CARGO_PKG_VERSION")))
+            .with_server_info(Implementation::new(
+                "wde-mcp-server",
+                env!("CARGO_PKG_VERSION"),
+            ))
             .with_instructions(
                 "Worst-Day-Ever adversarial stress-testing. Call `worst_day_ever_assess` \
                  with a project path, and read the skill at skill://worst-day-ever/SKILL.md.",
@@ -435,10 +484,22 @@ impl ServerHandler for WdeServer {
         request: SkillsGetRequestParams,
         _context: RequestContext<RoleServer>,
     ) -> Result<SkillsGetResult, McpError> {
-        match self.skills.get(&request.uri) {
+        // Accept both the canonical `skill://<path>/SKILL.md` form and the bare
+        // `skill://<path>` root form, so an agent that guesses either one works.
+        let uri = &request.uri;
+        let normalized = if self.skills.contains_key(uri) {
+            uri.clone()
+        } else {
+            format!("{}/SKILL.md", uri.trim_end_matches('/'))
+        };
+        match self.skills.get(&normalized) {
             Some(skill) => Ok(SkillsGetResult::new(skill.clone())),
             None => Err(McpError::invalid_params(
-                format!("skill not found: {}", request.uri),
+                format!(
+                    "skill not found: {}. Known skills: {}. Use the exact uri from skills/list.",
+                    request.uri,
+                    self.skills.keys().cloned().collect::<Vec<_>>().join(", ")
+                ),
                 None,
             )),
         }
@@ -492,8 +553,8 @@ impl ServerHandler for WdeServer {
                 McpError::invalid_params(format!("resource not found: {}", request.uri), None)
             })?;
         let text = String::from_utf8_lossy(bytes).to_string();
-        let contents = ResourceContents::text(text, request.uri.clone())
-            .with_mime_type("text/markdown");
+        let contents =
+            ResourceContents::text(text, request.uri.clone()).with_mime_type("text/markdown");
         Ok(ReadResourceResult::new(vec![contents]).into())
     }
 }
