@@ -31,8 +31,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     let app = axum::Router::new().nest_service("/mcp", service);
-    let addr = "127.0.0.1:3001";
-    let listener = TcpListener::bind(addr).await?;
+    let port = std::env::var("WDE_HTTP_PORT")
+        .ok()
+        .and_then(|p| p.parse::<u16>().ok())
+        .unwrap_or(3001);
+    let addr = format!("127.0.0.1:{port}");
+    let listener = TcpListener::bind(&addr).await?;
     tracing::info!(
         "WDE MCP server (HTTP) listening on http://{addr}/mcp  (root: {})",
         root.display()
