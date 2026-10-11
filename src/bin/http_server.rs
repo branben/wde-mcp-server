@@ -15,6 +15,7 @@ use wde_mcp_server::WdeServer;
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env().add_directive("info".parse()?))
+        .with_writer(std::io::stderr)
         .init();
 
     let root = std::env::args()
@@ -36,6 +37,34 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "WDE MCP server (HTTP) listening on http://{addr}/mcp  (root: {})",
         root.display()
     );
-    axum::serve(listener, app).await?;
+    // Graceful shutdown on SIGTERM/SIGINT.
+    let shutdown = async {
+        let ctrl_c = async {
+            tokio::signal::ctrl_c()
+                .await
+                .expect("failed to install Ctrl+C handler");
+        };
+
+        #[cfg(unix)]
+        let terminate = async {
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                .expect("failed to install SIGTERM handler")
+                .recv()
+                .await;
+        };
+
+        #[cfg(not(unix))]
+        let terminate = std::future::pending::<()>();
+
+        tokio::select! {
+            _ = ctrl_c => {},
+            _ = terminate => {},
+        }
+        tracing::info!("shutdown signal received, draining connections");
+    };
+
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown)
+        .await?;
     Ok(())
 }

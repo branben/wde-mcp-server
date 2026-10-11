@@ -26,6 +26,7 @@ use rmcp::{
     service::{RequestContext, RoleServer},
     tool, tool_handler, tool_router,
 };
+use sha2::{Digest, Sha256};
 
 /// A skill directory entry: URI suffix -> raw bytes of the file.
 type SkillFiles = HashMap<String, Vec<u8>>;
@@ -41,8 +42,10 @@ type SkillCatalog = (HashMap<String, SkillEntry>, HashMap<String, SkillFiles>);
 pub struct WdeServer {
     /// skill URI -> parsed skill entry
     skills: Arc<HashMap<String, SkillEntry>>,
-    /// skill URI -> (relative path -> file bytes) for resources/directory/read
-    skill_files: Arc<HashMap<String, SkillFiles>>,
+    /// flat file URI -> bytes for O(1) read_resource lookup
+    flat_files: Arc<HashMap<String, Vec<u8>>>,
+    /// skill root URI -> pre-built resource list for O(1) directory_read
+    dir_resources: Arc<HashMap<String, Vec<Resource>>>,
 }
 
 impl WdeServer {
@@ -50,9 +53,26 @@ impl WdeServer {
     pub fn from_root(root: impl AsRef<Path>) -> Result<Self, std::io::Error> {
         let root = root.as_ref();
         let (skills, skill_files) = Self::discover_skills(root)?;
+
+        // Build flat file map and pre-built directory resources for O(1) lookups.
+        let mut flat_files = HashMap::new();
+        let mut dir_resources = HashMap::new();
+        for (root_uri, files) in &skill_files {
+            let mut children = Vec::new();
+            for (rel, bytes) in files {
+                let file_uri = format!("skill://{}", rel);
+                let name = rel.rsplit('/').next().unwrap_or(rel).to_string();
+                children.push(Resource::new(file_uri.clone(), name));
+                flat_files.insert(file_uri, bytes.clone());
+            }
+            children.sort_by(|a, b| a.uri.cmp(&b.uri));
+            dir_resources.insert(root_uri.clone(), children);
+        }
+
         Ok(Self {
             skills: Arc::new(skills),
-            skill_files: Arc::new(skill_files),
+            flat_files: Arc::new(flat_files),
+            dir_resources: Arc::new(dir_resources),
         })
     }
 
@@ -149,73 +169,34 @@ impl WdeServer {
                 continue;
             };
             let size = bytes.len() as u64;
-            resources.push(SkillResource::new(
-                uri,
-                format!("sha256:{}", Self::hex_len(size)),
-                size,
-            ));
+            let digest = Self::sha256_hex(&bytes);
+            resources.push(SkillResource::new(uri, digest, size));
             out.insert(rel_str, bytes);
         }
         resources.sort_by(|a, b| a.uri.cmp(&b.uri));
     }
 
-    /// Cheap, non-cryptographic stand-in digest marker. The spec treats the
-    /// digest as an opaque cache key; a real deployment should use SHA-256.
-    fn hex_len(size: u64) -> String {
-        format!("{:064x}", size)
+    /// Real SHA-256 digest in hex, prefixed with `sha256:` per the MCP spec.
+    fn sha256_hex(bytes: &[u8]) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(bytes);
+        let digest = hasher.finalize();
+        format!("sha256:{}", hex::encode(digest))
     }
 
-    /// Parse `---`-delimited YAML frontmatter into a JSON object.
-    /// Handles `key: value` scalars and block scalars (`key: |`) — the WDE
-    /// SKILL.md uses a block scalar for its `description`.
+    /// Parse `---`-delimited YAML frontmatter into a JSON object using serde_yaml.
     fn frontmatter_to_json(content: &str) -> serde_json::Value {
-        let mut map = serde_json::Map::new();
         let Some(rest) = content.strip_prefix("---\n") else {
-            return serde_json::Value::Object(map);
+            return serde_json::Value::Object(serde_json::Map::new());
         };
-        let lines = rest.lines();
-        let mut block_key: Option<String> = None;
-        let mut block_lines: Vec<String> = Vec::new();
-
-        for line in lines {
-            if line.trim() == "---" {
-                break;
-            }
-            // Inside a block scalar: consume indented lines.
-            if let Some(key) = block_key.clone() {
-                if line.starts_with(' ') || line.starts_with('\t') {
-                    block_lines.push(line.trim_start().to_string());
-                    continue;
-                }
-                map.insert(
-                    key,
-                    serde_json::Value::String(block_lines.join("\n").trim().to_string()),
-                );
-                block_key = None;
-                block_lines.clear();
-            }
-            let Some((k, v)) = line.split_once(':') else {
-                continue;
-            };
-            let k = k.trim();
-            if k.is_empty() {
-                continue;
-            }
-            let v = v.trim();
-            if v == "|" || v == ">" || v == "|-" || v == ">-" {
-                block_key = Some(k.to_string());
-                continue;
-            }
-            let v = v.trim_matches(|c| c == '"' || c == '\'');
-            map.insert(k.to_string(), serde_json::Value::String(v.to_string()));
+        // Find the closing `---` delimiter.
+        let end = rest.find("\n---").unwrap_or(rest.len());
+        let yaml_str = &rest[..end];
+        match serde_yaml::from_str::<serde_yaml::Value>(yaml_str) {
+            Ok(yaml_val) => serde_json::to_value(&yaml_val)
+                .unwrap_or_else(|_| serde_json::Value::Object(serde_json::Map::new())),
+            Err(_) => serde_json::Value::Object(serde_json::Map::new()),
         }
-        if let Some(key) = block_key {
-            map.insert(
-                key,
-                serde_json::Value::String(block_lines.join("\n").trim().to_string()),
-            );
-        }
-        serde_json::Value::Object(map)
     }
 
     /// The skill URI for the bundled WDE skill, if present.
@@ -249,8 +230,7 @@ impl WdeServer {
     /// frontmatter only, so an agent that needs the instructions reads them
     /// here. Returns `None` when the URI is not an advertised resource.
     pub fn read_skill_file(&self, uri: &str) -> Option<&Vec<u8>> {
-        let rel = uri.strip_prefix("skill://")?;
-        self.skill_files.values().find_map(|files| files.get(rel))
+        self.flat_files.get(uri)
     }
 }
 
@@ -386,7 +366,7 @@ impl WdeServer {
     }
 
     fn walk_recon(&self, root: &Path, dir: &Path, recon: &mut Recon, depth: usize) {
-        if depth > 3 {
+        if depth > 5 {
             return;
         }
         let Ok(entries) = fs::read_dir(dir) else {
@@ -517,15 +497,11 @@ impl ServerHandler for WdeServer {
             .uri
             .strip_suffix("/SKILL.md")
             .unwrap_or(&request.uri);
-        let files = self.skill_files.get(root_uri);
-        let mut children: Vec<Resource> = Vec::new();
-        if let Some(files) = files {
-            for rel in files.keys() {
-                let name = rel.rsplit('/').next().unwrap_or(rel).to_string();
-                children.push(Resource::new(format!("skill://{}", rel), name));
-            }
-            children.sort_by(|a, b| a.uri.cmp(&b.uri));
-        }
+        let children = self
+            .dir_resources
+            .get(root_uri)
+            .cloned()
+            .unwrap_or_default();
         let mut result = skills::ResourcesDirectoryReadResult::new(children);
         let supports_cache = context
             .protocol_version()
@@ -542,19 +518,20 @@ impl ServerHandler for WdeServer {
         request: ReadResourceRequestParams,
         _context: RequestContext<RoleServer>,
     ) -> Result<ReadResourceResponse, McpError> {
-        let rel = request.uri.strip_prefix("skill://").ok_or_else(|| {
-            McpError::invalid_params(format!("not a skill URI: {}", request.uri), None)
+        let bytes = self.flat_files.get(&request.uri).ok_or_else(|| {
+            McpError::invalid_params(format!("resource not found: {}", request.uri), None)
         })?;
-        let bytes = self
-            .skill_files
-            .values()
-            .find_map(|files| files.get(rel))
-            .ok_or_else(|| {
-                McpError::invalid_params(format!("resource not found: {}", request.uri), None)
-            })?;
-        let text = String::from_utf8_lossy(bytes).to_string();
-        let contents =
-            ResourceContents::text(text, request.uri.clone()).with_mime_type("text/markdown");
+
+        // Detect binary content and return base64 for non-UTF-8 files.
+        let contents = if let Ok(text) = std::str::from_utf8(bytes) {
+            ResourceContents::text(text.to_string(), request.uri.clone())
+                .with_mime_type("text/markdown")
+        } else {
+            ResourceContents::blob(
+                base64::Engine::encode(&base64::engine::general_purpose::STANDARD, bytes),
+                request.uri.clone(),
+            )
+        };
         Ok(ReadResourceResult::new(vec![contents]).into())
     }
 }
