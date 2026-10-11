@@ -950,8 +950,8 @@ dependencies = [
 
 [[package]]
 name = "rmcp"
-version = "3.3.0"
-source = "git+https://github.com/branben/rust-sdk.git?branch=feat%2Fsep-2640-skills#0e140c82932d478cb6a6c1e2788ae20eafc1fbc4"
+version = "3.5.1"
+source = "git+https://github.com/branben/rust-sdk.git?branch=feat%2Fsep-2640-skills#73408a2870ad8282c28068c8e230e59dbb2950df"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
@@ -982,8 +982,8 @@ dependencies = [
 
 [[package]]
 name = "rmcp-macros"
-version = "3.3.0"
-source = "git+https://github.com/branben/rust-sdk.git?branch=feat%2Fsep-2640-skills#0e140c82932d478cb6a6c1e2788ae20eafc1fbc4"
+version = "3.5.1"
+source = "git+https://github.com/branben/rust-sdk.git?branch=feat%2Fsep-2640-skills#73408a2870ad8282c28068c8e230e59dbb2950df"
 dependencies = [
  "darling",
  "proc-macro2",
