@@ -94,3 +94,47 @@ fn every_advertised_resource_is_readable() {
         );
     }
 }
+
+/// SEP-2640 conformance: literal-block chomping must follow the YAML 1.2 spec
+/// so the frontmatter advertised in `skills/list` matches what a standard YAML
+/// parser (e.g. the `yaml` npm package used by MCP Inspector) would produce
+/// from the served `SKILL.md`. A bare `|` keeps a trailing newline. This
+/// regressed with `serde_yaml`, which silently dropped it.
+#[test]
+fn literal_block_chomping_is_spec_compliant() {
+    let server = WdeServer::from_root(skill_root()).expect("load skills");
+    let entry = server.get_skill("skill://worst-day-ever").expect("skill");
+
+    let description = entry
+        .frontmatter
+        .get("description")
+        .and_then(serde_json::Value::as_str)
+        .expect("description must be a string");
+
+    assert!(
+        description.ends_with("debug sessions.\n"),
+        "bare `|` must keep the trailing newline; got tail {description:?}"
+    );
+
+    // Reference-parse the served file's frontmatter with yaml-rust2 (the same
+    // spec-compliant engine the server uses) and require identical output —
+    // i.e. the served value comes from parsing the served bytes, not from any
+    // post-processing that could diverge.
+    let raw = String::from_utf8_lossy(
+        server
+            .read_skill_file("skill://worst-day-ever/SKILL.md")
+            .expect("SKILL.md readable"),
+    );
+    let fm = raw
+        .strip_prefix("---\n")
+        .and_then(|r| r.split("\n---").next());
+    let parsed = yaml_rust2::YamlLoader::load_from_str(fm.expect("delimited frontmatter"))
+        .expect("frontmatter must parse");
+    let reference = parsed[0]["description"]
+        .as_str()
+        .expect("reference description must be a string");
+    assert_eq!(
+        description, reference,
+        "served description must equal a plain YAML parse of the served bytes"
+    );
+}

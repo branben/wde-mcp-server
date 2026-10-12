@@ -184,7 +184,12 @@ impl WdeServer {
         format!("sha256:{}", hex::encode(digest))
     }
 
-    /// Parse `---`-delimited YAML frontmatter into a JSON object using serde_yaml.
+    /// Parse `---`-delimited YAML frontmatter into a JSON object.
+    ///
+    /// Uses `yaml-rust2`, a YAML 1.2 spec-compliant parser, so literal-block
+    /// scalars parse the same way they do in other spec-compliant parsers
+    /// (e.g. the `yaml` npm package used by MCP Inspector): a bare `|` keeps a
+    /// trailing newline, `|-` strips it, and `|+` keeps all trailing newlines.
     fn frontmatter_to_json(content: &str) -> serde_json::Value {
         let Some(rest) = content.strip_prefix("---\n") else {
             return serde_json::Value::Object(serde_json::Map::new());
@@ -192,10 +197,44 @@ impl WdeServer {
         // Find the closing `---` delimiter.
         let end = rest.find("\n---").unwrap_or(rest.len());
         let yaml_str = &rest[..end];
-        match serde_yaml::from_str::<serde_yaml::Value>(yaml_str) {
-            Ok(yaml_val) => serde_json::to_value(&yaml_val)
-                .unwrap_or_else(|_| serde_json::Value::Object(serde_json::Map::new())),
-            Err(_) => serde_json::Value::Object(serde_json::Map::new()),
+        match yaml_rust2::YamlLoader::load_from_str(yaml_str) {
+            Ok(docs) if !docs.is_empty() => Self::yaml_to_json(&docs[0]),
+            _ => serde_json::Value::Object(serde_json::Map::new()),
+        }
+    }
+
+    /// Convert a parsed YAML node into its natural JSON representation.
+    fn yaml_to_json(yaml: &yaml_rust2::Yaml) -> serde_json::Value {
+        use yaml_rust2::Yaml;
+        match yaml {
+            Yaml::String(s) => serde_json::Value::String(s.clone()),
+            Yaml::Real(s) => s
+                .parse::<f64>()
+                .ok()
+                .map(serde_json::Value::from)
+                .unwrap_or_else(|| serde_json::Value::String(s.clone())),
+            Yaml::Integer(i) => serde_json::Value::from(*i),
+            Yaml::Boolean(b) => serde_json::Value::Bool(*b),
+            Yaml::Null => serde_json::Value::Null,
+            Yaml::Array(items) => {
+                serde_json::Value::Array(items.iter().map(Self::yaml_to_json).collect())
+            }
+            Yaml::Hash(map) => {
+                let mut obj = serde_json::Map::new();
+                for (k, v) in map {
+                    if let Some(key) = k
+                        .as_str()
+                        .map(str::to_owned)
+                        .or_else(|| k.as_i64().map(|i| i.to_string()))
+                    {
+                        obj.insert(key, Self::yaml_to_json(v));
+                    }
+                }
+                serde_json::Value::Object(obj)
+            }
+            // Alias is not fully supported by yaml-rust2; render unresolvable
+            // or invalid nodes as null rather than failing.
+            Yaml::Alias(_) | Yaml::BadValue => serde_json::Value::Null,
         }
     }
 
